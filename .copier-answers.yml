@@ -1,0 +1,14 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: 1.0.11
+_src_path: gh:ceesem/cave-copier
+directory_name: catacombs-task
+github_user: ceesem
+initial_version: 0.0.1
+project_description: Assemble ossify skeletons for a dataset
+project_name: catacombs-task
+project_slug: catacombs_task
+python_version: '3.13'
+template_type: task
+use_vim_jupyter: true
+user_email: caseysm@gmail.com
+user_name: Casey Schneider-Mizell

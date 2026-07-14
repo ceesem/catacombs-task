@@ -1,0 +1,34 @@
+"""Template build recipe. Copy to config/<profile>/build.py and fill in.
+
+This is the ONLY per-dataset code needed to seed a queue. Everything else — the
+datastack, server, output path, and task parameters — comes from the same
+profile's task.env, and the shared build_tasks.py driver handles building and
+writing the feather.
+
+``build_tasks.py`` calls ``get_root_ids`` with a CAVEclient already pointed at
+the profile's ``DATASTACK_NAME`` / ``SERVER_ADDRESS``.
+"""
+
+
+def get_root_ids(client) -> list[int]:
+    """Return the list of root_ids to skeletonize for this dataset.
+
+    Replace this with however you select cells. For example, the single-soma
+    neurons from a soma table::
+
+        somas = client.materialize.tables.neurons_soma_model().query()
+        return somas["pt_root_id"].unique().tolist()
+
+    If your dataset pins a materialization version, set it here (it is part of
+    how you select ids)::
+
+        client.version = 1822
+
+    Kicking off precompute for these ids first is recommended so the skeleton
+    service has them ready before workers run::
+
+        client.skeleton.generate_bulk_skeletons_async(
+            root_ids=root_ids, skeleton_version=4
+        )
+    """
+    raise NotImplementedError("Fill in how to select root_ids for your dataset.")

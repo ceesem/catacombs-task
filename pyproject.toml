@@ -1,0 +1,209 @@
+[build-system]
+requires = ["uv_build>=0.9.5,<1.0.0"]
+build-backend = "uv_build"
+
+[project]
+name = "catacombs_task"
+version = "0.0.1"
+description = "Assemble ossify skeletons for a dataset"
+
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "cloud-files>=4.30.1",
+    "task-queue>=2.14.0",
+    "pandas>=2.2.3",
+    "caveclient>=8.0.1",
+    "ossify>=0.1.3",
+    "numpy>=2.0.2",
+    "cloud-volume>=12.13.3",
+    "xgboost>=3.2.0",
+    "scikit-learn>=1.9.0",
+]
+authors = [
+    { name = "Casey Schneider-Mizell", email = "caseys@alleninstitute.org" },
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel",
+]
+lint = [
+    "ruff",
+]
+
+[tool.uv]
+default-groups = [
+    "dev",
+    "lint",
+]
+
+# Ruff configuration - minimal rules to start
+# See https://docs.astral.sh/ruff/rules/ for available rules
+# Common additions: select = ["E", "F", "I"] for errors, pyflakes, and isort
+[tool.ruff]
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select=["E9","F63","F7","F82"]  # Minimal: syntax errors and undefined names
+
+# -----------------------------------------------------------------------------
+# Config profiles
+#
+# Every task below takes a single, REQUIRED `-e/--env <name>` selector that
+# picks a profile directory under config/. There is no default — the profile is
+# always explicit. Each profile layers on top of
+# config/common.env:
+#     config/common.env         shared defaults (loaded first)
+#     config/<env>/task.env      queue / feather / cloudpath / CAVE servers
+#     config/<env>/cluster.env   cluster identity (GKE)
+# Later files override earlier ones, so a profile can override any common value.
+# Switch datasets by changing one flag, e.g.  `poe insert_tasks -e microns`.
+# See config/README.md.
+# -----------------------------------------------------------------------------
+
+[tool.poe.tasks.build_tasks]
+cmd = "uv run --env-file config/common.env --env-file config/${env}/task.env --frozen build_tasks.py ${env}"
+help = "Build the task feather for a config profile (e.g. -e v1dd)"
+    [[tool.poe.tasks.build_tasks.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+[tool.poe.tasks.insert_tasks]
+cmd = "uv run --env-file config/common.env --env-file config/${env}/task.env --frozen insert_tasks.py ${env}"
+help = "Insert tasks into the queue for a config profile (e.g. -e v1dd)"
+    [[tool.poe.tasks.insert_tasks.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+[tool.poe.tasks.check_filequeue]
+cmd = "uv run --env-file config/common.env --env-file config/${env}/task.env --frozen sh check_filequeue.sh"
+help = "Check the status of a taskqueue (filequeue only)"
+    [[tool.poe.tasks.check_filequeue.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+[tool.poe.tasks.launch_worker]
+cmd = "uv run --env-file config/common.env --env-file config/${env}/task.env --frozen run.py"
+help = "Launch a local worker for a config profile (e.g. -e v1dd)"
+    [[tool.poe.tasks.launch_worker.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+# Run a worker in the built Docker image (the same TASK_DOCKER_IMAGE used on the
+# cluster). We source common.env only to resolve that image tag on the host; the
+# container itself receives config via the two --env-file flags. Assumes the
+# image has been built/pulled and that CAVE secrets live in ~/.cloudvolume/secrets.
+#
+# Credentials for cloud storage: on the cluster GOOGLE_APPLICATION_CREDENTIALS
+# points at a google-secret.json baked into the k8s secret. Locally we instead
+# mount your gcloud ADC (~/.config/gcloud) read-only so the container writes to
+# GCS as you do on the host — no service-account key file required for testing.
+[tool.poe.tasks.launch_worker_docker]
+shell = '''
+set -a
+. config/common.env
+. config/${env}/task.env
+set +a
+docker run \
+    --platform linux/amd64 \
+    --env-file config/common.env \
+    --env-file config/${env}/task.env \
+    -v "$HOME/.cloudvolume/secrets:/root/.cloudvolume/secrets" \
+    -v "$HOME/.config/gcloud:/root/.config/gcloud:ro" \
+    "$TASK_DOCKER_IMAGE"
+'''
+help = "Run a worker in the Docker image for a config profile (e.g. -e v1dd)"
+    [[tool.poe.tasks.launch_worker_docker.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+[tool.poe.tasks.reset_queue]
+cmd = "uv run --env-file config/common.env --env-file config/${env}/task.env --frozen sh reset_filequeue.sh"
+help = "Reset a taskqueue (local filequeue only)"
+    [[tool.poe.tasks.reset_queue.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+[tool.poe.tasks.delete_local_queue]
+cmd = "uv run --env-file config/common.env --env-file config/${env}/task.env --frozen sh delete_filequeue.sh"
+help = "Delete a taskqueue (local filequeue only)"
+    [[tool.poe.tasks.delete_local_queue.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+[tool.poe.tasks.make_scripts]
+cmd = "bash scripts/process_template.sh config/common.env config/${env}/task.env config/${env}/cluster.env"
+help = "Render Kubernetes scripts for a config profile (e.g. -e v1dd)"
+    [[tool.poe.tasks.make_scripts.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+# launch_cluster / apply_task / delete_cluster each re-render scripts from the
+# selected profile first (via make_scripts), so you can never deploy stale
+# scripts and never need to call make_scripts by hand. make_scripts remains
+# available on its own for previewing the rendered scripts/ before launching.
+[tool.poe.tasks.launch_cluster]
+sequence = ["make_scripts -e ${env}", { cmd = "bash scripts/make_cluster.sh" }]
+help = "Render scripts and create the GKE cluster for a config profile (e.g. -e v1dd)"
+    [[tool.poe.tasks.launch_cluster.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+# Point kubectl at a profile's cluster (refreshes kubeconfig / current context).
+# Standalone for switching between clusters, and used by apply_task so a deploy
+# always targets the named profile's cluster rather than whatever was current.
+[tool.poe.tasks.use_context]
+cmd = "bash scripts/use_context.sh config/common.env config/${env}/cluster.env"
+help = "Point kubectl at a profile's GKE cluster (e.g. -e microns_v1822)"
+    [[tool.poe.tasks.use_context.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+[tool.poe.tasks.apply_task]
+sequence = ["make_scripts -e ${env}", "use_context -e ${env}", { cmd = "kubectl apply -f scripts/kube-task.yml" }]
+help = "Render scripts and deploy the task to the cluster for a config profile (e.g. -e v1dd)"
+    [[tool.poe.tasks.apply_task.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+[tool.poe.tasks.deploy_task]
+sequence = ["launch_cluster -e ${env}", "apply_task -e ${env}"]
+help = "Create the cluster and deploy the task for a config profile (e.g. -e v1dd)"
+    [[tool.poe.tasks.deploy_task.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
+[tool.poe.tasks.delete_cluster]
+sequence = ["make_scripts -e ${env}", { cmd = "bash scripts/delete_cluster.sh" }]
+help = "Delete the GKE cluster for a config profile. Deletes ALL its resources! (e.g. -e v1dd)"
+    [[tool.poe.tasks.delete_cluster.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']

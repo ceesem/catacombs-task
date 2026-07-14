@@ -1,0 +1,5 @@
+.git
+.venv
+# Task feathers are only used locally by insert_tasks.py to seed the queue;
+# the worker reads tasks from the queue, so they don't belong in the image.
+config/*/tasks/
