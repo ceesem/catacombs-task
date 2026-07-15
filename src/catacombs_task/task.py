@@ -39,11 +39,28 @@ session_config.set_session_defaults(
 # Output artifact extension. One ".osy" file is written per completed neuron.
 OSSIFY_EXTENSION = "osy"
 
-# Marker extension for neurons skipped as single-vertex skeletons. A
-# "{root_id}.err.singlet" file records that the id was tried and is too small to
-# assemble (one vertex), so reruns don't re-fetch it (see ``filter_tasks``). The
-# "err.<reason>" convention leaves room for other permanent-skip markers later.
-SINGLET_EXTENSION = "err.singlet"
+# Permanent, data-caused failure markers follow the convention
+# "{root_id}.err.<reason>": the id was tried and will never succeed on retry
+# (a property of the neuron, not a transient/server error). ``filter_tasks``
+# treats any such marker as resolved, so reruns don't re-enqueue it, and it is
+# NOT re-fetched. Add new reasons freely — the machinery keys off the "err"
+# segment, not the specific reason.
+ERR_PREFIX = "err"
+# The one reason wired up so far: single-vertex skeletons, too small for
+# ossify's graph smoothing — "{root_id}.err.singlet".
+SINGLET_EXTENSION = f"{ERR_PREFIX}.singlet"
+
+
+def is_resolved(filename: str) -> bool:
+    """Whether an output-dir artifact means its root_id is done and must not be
+    re-enqueued: a ``.osy`` output (success) or any ``{root_id}.err.<reason>``
+    marker (permanent, data-caused failure). ``*_error.json`` sidecars are
+    transient/retryable and are NOT resolved.
+    """
+    if filename.endswith(f".{OSSIFY_EXTENSION}"):
+        return True
+    parts = filename.split(".")  # "<root_id>.err.<reason>"; root_ids have no dots
+    return len(parts) >= 3 and parts[1] == ERR_PREFIX
 
 
 def _record_error(cf, filename: str, stage: str, root_id: int, exc: Exception) -> None:
@@ -75,17 +92,14 @@ def _record_error(cf, filename: str, stage: str, root_id: int, exc: Exception) -
 def filter_tasks(task_df, cloudpath):
     """Drop tasks already resolved in ``cloudpath``.
 
-    A neuron is resolved once it has either its output ``.osy`` (assembled) or a
-    ``.singlet`` marker (tried, but a single-vertex skeleton too small to use).
-    Used by ``insert_tasks.py`` so a rerun only enqueues neurons that have not
-    resolved yet (errors leave a ``*_error.json`` sidecar, not either of those,
-    so failed neurons are retried).
+    A neuron is resolved once it has either its output ``.osy`` (assembled) or
+    any ``{root_id}.err.<reason>`` marker (tried, but a permanent data-caused
+    failure — e.g. ``.err.singlet``). Used by ``insert_tasks.py`` so a rerun
+    only enqueues neurons that have not resolved yet (errors leave a
+    ``*_error.json`` sidecar, which is NOT resolved, so failed neurons retry).
     """
     cf = CloudFiles(cloudpath)
-    resolved = (f".{OSSIFY_EXTENSION}", f".{SINGLET_EXTENSION}")
-    done_ids = np.array(
-        [int(f.split(".")[0]) for f in cf.list() if f.endswith(resolved)]
-    )
+    done_ids = np.array([int(f.split(".")[0]) for f in cf.list() if is_resolved(f)])
     if len(done_ids) == 0:
         return task_df
     return task_df[~task_df["root_id"].isin(done_ids)]

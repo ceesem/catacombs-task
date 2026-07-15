@@ -88,6 +88,14 @@ help = "Check the status of a taskqueue (filequeue only)"
     name = "env"
     required = true
     help = "Config profile under config/ (e.g. v1dd, microns)"
+
+[tool.poe.tasks.check_progress]
+cmd = "uv run --env-file config/common.env --env-file config/${env}/task.env --frozen check_progress.py ${env}"
+help = "Report processed (done) vs outstanding tasks for a profile (e.g. -e v1dd)"
+    [[tool.poe.tasks.check_progress.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
     options = ['-e', '--env']
 
 [tool.poe.tasks.launch_worker]
