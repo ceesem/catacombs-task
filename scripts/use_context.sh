@@ -10,6 +10,8 @@
 #   (GOOGLE_ZONE / GOOGLE_PROJECT_NAME come from common.env; GOOGLE_CLUSTER_NAME
 #    from the profile's cluster.env)
 
+set -euo pipefail
+
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <env_file> [<env_file> ...]"
   exit 1

@@ -118,9 +118,7 @@ var/
 /config/common.env
 
 # --- Rendered cluster scripts ---
-# Generated from templates/ by scripts/process_template.sh (poe make_scripts),
-# so they carry the live profile's identifiers. The templates/ sources use
-# ${PLACEHOLDER} vars and stay in git; only the rendered output is ignored.
-/scripts/kube-task.yml
-/scripts/make_cluster.sh
-/scripts/delete_cluster.sh
+# Rendered per profile into config/<profile>/scripts/ by process_template.sh
+# (poe make_scripts). They carry the live profile's identifiers and are already
+# covered by the /config/*/ rule above; the templates/ sources (which use
+# ${PLACEHOLDER} vars) stay in git.

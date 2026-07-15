@@ -175,7 +175,7 @@ This template helps you define a cluster and deploy workers to it with minimal c
 
 There are two steps: first create the cluster (the compute resources), then deploy the tasks that will run on it.
 Both are driven from the profile's config — `poe launch_cluster -e <profile>` creates the cluster and `poe apply_task -e <profile>` deploys the task to it.
-Each of these **first re-renders the scripts** from `config/common.env`, `config/<profile>/task.env`, and `config/<profile>/cluster.env` (in that order) into `scripts/kube-task.yml`, `scripts/make_cluster.sh`, and `scripts/delete_cluster.sh` before running — so you never have to remember a separate render step, and you can never accidentally launch stale scripts after editing a config.
+Each of these **first re-renders the scripts** from `config/common.env`, `config/<profile>/task.env`, and `config/<profile>/cluster.env` (in that order) into that profile's own `config/<profile>/scripts/` dir (`kube-task.yml`, `make_cluster.sh`, `delete_cluster.sh`) before running — so you never have to remember a separate render step, you can never accidentally launch stale scripts after editing a config, and one profile's scripts can never shadow another's.
 The `launch_cluster` command will take several minutes.
 If you just want to inspect the generated scripts without launching anything, `poe make_scripts -e <profile>` renders them and stops.
 
@@ -251,7 +251,7 @@ Just run `poe apply_task -e <profile>` again — it re-renders `kube-task.yml` f
 ### 4. Tearing down your cluster
 
 Once you are done with your tasks, you should delete your cluster to stop paying for its resources.
-Run `poe delete_cluster -e <profile>`; it re-renders the profile's `scripts/delete_cluster.sh` and deletes the cluster named there, so you always delete the cluster for the profile you name (no dependence on whatever was last rendered).
+Run `poe delete_cluster -e <profile>`; it re-renders the profile's `config/<profile>/scripts/delete_cluster.sh` and deletes the cluster named there, so you always delete the cluster for the profile you name (no dependence on whatever was last rendered).
 Alternatively, you can delete the cluster manually in the GCP console.
 
 ## Acknowledgements

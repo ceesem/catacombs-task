@@ -148,7 +148,7 @@ help = "Delete a taskqueue (local filequeue only)"
     options = ['-e', '--env']
 
 [tool.poe.tasks.make_scripts]
-cmd = "bash scripts/process_template.sh config/common.env config/${env}/task.env config/${env}/cluster.env"
+cmd = "bash scripts/process_template.sh ${env} config/common.env config/${env}/task.env config/${env}/cluster.env"
 help = "Render Kubernetes scripts for a config profile (e.g. -e v1dd)"
     [[tool.poe.tasks.make_scripts.args]]
     name = "env"
@@ -161,7 +161,7 @@ help = "Render Kubernetes scripts for a config profile (e.g. -e v1dd)"
 # scripts and never need to call make_scripts by hand. make_scripts remains
 # available on its own for previewing the rendered scripts/ before launching.
 [tool.poe.tasks.launch_cluster]
-sequence = ["make_scripts -e ${env}", { cmd = "bash scripts/make_cluster.sh" }]
+sequence = ["make_scripts -e ${env}", { cmd = "bash config/${env}/scripts/make_cluster.sh" }]
 help = "Render scripts and create the GKE cluster for a config profile (e.g. -e v1dd)"
     [[tool.poe.tasks.launch_cluster.args]]
     name = "env"
@@ -182,7 +182,7 @@ help = "Point kubectl at a profile's GKE cluster (e.g. -e microns_v1822)"
     options = ['-e', '--env']
 
 [tool.poe.tasks.apply_task]
-sequence = ["make_scripts -e ${env}", "use_context -e ${env}", { cmd = "kubectl apply -f scripts/kube-task.yml" }]
+sequence = ["make_scripts -e ${env}", "use_context -e ${env}", { cmd = "kubectl apply -f config/${env}/scripts/kube-task.yml" }]
 help = "Render scripts and deploy the task to the cluster for a config profile (e.g. -e v1dd)"
     [[tool.poe.tasks.apply_task.args]]
     name = "env"
@@ -200,7 +200,7 @@ help = "Create the cluster and deploy the task for a config profile (e.g. -e v1d
     options = ['-e', '--env']
 
 [tool.poe.tasks.delete_cluster]
-sequence = ["make_scripts -e ${env}", { cmd = "bash scripts/delete_cluster.sh" }]
+sequence = ["make_scripts -e ${env}", { cmd = "bash config/${env}/scripts/delete_cluster.sh" }]
 help = "Delete the GKE cluster for a config profile. Deletes ALL its resources! (e.g. -e v1dd)"
     [[tool.poe.tasks.delete_cluster.args]]
     name = "env"

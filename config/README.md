@@ -47,8 +47,10 @@ Files are loaded in this order, and **later files override earlier ones**:
 - Cluster tasks (`launch_cluster`, `apply_task`, `deploy_task`, `delete_cluster`,
   and `make_scripts`) additionally source `<env>/cluster.env`. They all render
   first: `scripts/process_template.sh` sources all three files in order and
-  renders `templates/* → scripts/*` with `envsubst` before the cluster action
-  runs, so there is no separate render step to remember.
+  renders `templates/* → config/<env>/scripts/*` with `envsubst` before the
+  cluster action runs, so there is no separate render step to remember. Each
+  profile renders into its own `scripts/` dir, so one profile's rendered
+  scripts can never shadow another's.
 
 To override a common value for one dataset, just re-declare it in that
 profile's `task.env` or `cluster.env`.
