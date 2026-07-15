@@ -22,6 +22,7 @@ Run it with a profile:  ``poe insert_tasks -e <profile>``.
 
 import argparse
 import os
+import sys
 
 import pandas as pd
 from taskqueue import TaskQueue
@@ -48,7 +49,14 @@ def main() -> None:
     parser.add_argument(
         "profile", help="Config profile under config/ (e.g. v1dd, microns)"
     )
-    profile = parser.parse_args().profile
+    parser.add_argument(
+        "--no-ask",
+        action="store_true",
+        help="Skip the confirmation prompt and insert immediately (for scripting). "
+        "Via poe: `poe insert_tasks -e <profile> -- --no-ask`.",
+    )
+    args = parser.parse_args()
+    profile = args.profile
 
     parameter_filename = task_feather_path(profile)
 
@@ -65,11 +73,42 @@ def main() -> None:
     # the ones still missing an output (see filter_tasks in task.py).
     original_number = len(task_df)
     task_df = filter_tasks(task_df, target_cloudpath)
-    print(f"Inserting {len(task_df)}/{original_number} tasks!")
+
+    # Echo the effective, baked-in parameters before seeding the queue. cloudpath
+    # and the queue URL are frozen into each task here (not read from the env at
+    # run time), so a stale CF_CLOUDPATH silently misdirects every output and its
+    # error sidecar. Surfacing them here is the cheapest guard against that drift.
+    datastack = task_df["datastack_name"].iloc[0] if len(task_df) else "(n/a)"
+    print("── insert_tasks ──────────────────────────────────────")
+    print(f"  profile   : {profile}")
+    print(f"  queue     : {os.environ.get('TASKQUEUE_PATH')}")
+    print(f"  cloudpath : {target_cloudpath}")
+    print(f"  datastack : {datastack}")
+    print(f"  feather   : {parameter_filename}")
+    print(
+        f"  tasks     : {len(task_df)} to insert "
+        f"({original_number - len(task_df)} already done, skipped)"
+    )
+    print("───────────────────────────────────────────────────────")
 
     if len(task_df) == 0:
         print("No tasks to insert!")
         return
+
+    # Confirm before seeding the queue — the parameters above are frozen into
+    # every task, so this is the last chance to catch a stale cloudpath/queue.
+    # --no-ask bypasses for scripted runs; a non-interactive shell without it
+    # refuses rather than block on input() with no TTY.
+    if not args.no_ask:
+        if not sys.stdin.isatty():
+            print(
+                "Non-interactive shell: re-run with --no-ask to insert without "
+                "confirmation."
+            )
+            return
+        if input("Proceed with insert? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("Aborted; nothing inserted.")
+            return
 
     # Each row's columns become keyword arguments to _run_task.
     task_args = task_df.to_dict(orient="records")
