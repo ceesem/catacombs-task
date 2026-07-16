@@ -148,7 +148,10 @@ def main() -> None:
 
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     task_df.to_feather(out)
-    print(f"Wrote {len(task_df)} tasks to {out}")
+    # One row per cell (root_id). insert_tasks later groups these into queued
+    # tasks of TASK_BATCH_SIZE cells each — so the queue holds far fewer tasks
+    # than there are rows here.
+    print(f"Wrote {len(task_df)} cells (one row per root_id) to {out}")
     print(f"Insert them with:  poe insert_tasks -e {profile}")
 
 
