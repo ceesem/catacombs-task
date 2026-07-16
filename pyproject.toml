@@ -116,6 +116,15 @@ help = "Delete stale .blocked.* markers for resolved cells (add -- --dry-run to 
     help = "Config profile under config/ (e.g. v1dd, microns)"
     options = ['-e', '--env']
 
+[tool.poe.tasks.inspect_errors]
+cmd = "uv run --env-file config/common.env --env-file config/${env}/task.env --frozen inspect_errors.py ${env}"
+help = "Summarize the errors under .blocked.server_error by type (what's building up)"
+    [[tool.poe.tasks.inspect_errors.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
 [tool.poe.tasks.launch_worker]
 cmd = "uv run --env-file config/common.env --env-file config/${env}/task.env --frozen run.py"
 help = "Launch a local worker for a config profile (e.g. -e v1dd)"
