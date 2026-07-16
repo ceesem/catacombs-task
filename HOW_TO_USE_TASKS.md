@@ -42,8 +42,9 @@ poe deploy_task        -e microns_v1822
 loader, which only *downloads* skeletons the CAVE skeleton service has already
 produced — it does not generate them on demand. So kick off generation, wait for
 the backend to catch up, then insert. `insert_tasks` groups cells into batches of
-`TASK_BATCH_SIZE` (default 10, in `common.env`) per queued task; each worker
-loads a whole batch in one pooled call (~1.5x throughput).
+`TASK_BATCH_SIZE` (default 5, in `common.env`; override per-run with
+`-- --batch-size N`) per queued task; each worker loads a whole batch in one
+pooled call (~1.5x throughput).
 
 See `config/README.md` for the full layout and what belongs in each file.
 

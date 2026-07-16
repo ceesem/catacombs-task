@@ -13,7 +13,7 @@ as ``config/common.env`` + ``config/<profile>/task.env`` (see
 
     CF_CLOUDPATH              CloudFiles output dir; also used to skip finished tasks
     TASKQUEUE_PATH            queue to insert into (SQS URL, fq:// path, …)
-    TASK_BATCH_SIZE           cells per queued task (default 10)
+    TASK_BATCH_SIZE           cells per queued task (default 5; --batch-size overrides)
 
 The task feather is located by ``task_feather_path(profile)`` — the same path
 ``build_tasks.py`` writes — so it is derived from the profile name and needs no
@@ -57,8 +57,19 @@ def main() -> None:
         help="Skip the confirmation prompt and insert immediately (for scripting). "
         "Via poe: `poe insert_tasks -e <profile> -- --no-ask`.",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cells per queued task, overriding TASK_BATCH_SIZE for this run "
+        "(default: TASK_BATCH_SIZE, or 5). "
+        "Via poe: `poe insert_tasks -e <profile> -- --batch-size 25`.",
+    )
     args = parser.parse_args()
     profile = args.profile
+    if args.batch_size is not None and args.batch_size < 1:
+        parser.error("--batch-size must be a positive integer")
 
     parameter_filename = task_feather_path(profile)
 
@@ -81,9 +92,17 @@ def main() -> None:
     # run time), so a stale CF_CLOUDPATH silently misdirects every output and its
     # error sidecar. Surfacing them here is the cheapest guard against that drift.
     # Cells are grouped into batches of BATCH_SIZE cells per queued task; the
-    # worker loads each batch in one pooled ossify call (see task.py). N=10 is
-    # the measured throughput sweet spot; override via TASK_BATCH_SIZE.
-    batch_size = int(os.environ.get("TASK_BATCH_SIZE", "10"))
+    # worker loads each batch in one pooled ossify call (see task.py). Pooling
+    # trades a bit of memory for ~1.5x throughput; the --batch-size flag
+    # overrides TASK_BATCH_SIZE for a one-off run without editing task.env.
+    if args.batch_size is not None:
+        batch_size = args.batch_size
+        batch_source = "--batch-size"
+    else:
+        batch_size = int(os.environ.get("TASK_BATCH_SIZE", "5"))
+        batch_source = (
+            "TASK_BATCH_SIZE" if "TASK_BATCH_SIZE" in os.environ else "default"
+        )
     n_batches = -(-len(task_df) // batch_size)  # ceil division
 
     datastack = task_df["datastack_name"].iloc[0] if len(task_df) else "(n/a)"
@@ -97,7 +116,7 @@ def main() -> None:
         f"  cells     : {len(task_df)} to insert "
         f"({original_number - len(task_df)} already done, skipped)"
     )
-    print(f"  tasks     : {n_batches} batches of ≤{batch_size} cells")
+    print(f"  tasks     : {n_batches} batches of ≤{batch_size} cells ({batch_source})")
     print("───────────────────────────────────────────────────────")
 
     if len(task_df) == 0:
