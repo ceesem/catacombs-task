@@ -21,6 +21,12 @@ disagree with what ``build_tasks.py`` wrote. If ``CF_CLOUDPATH`` is set, cells
 already assembled there are skipped (via ``filter_tasks``), so a re-run only
 generates what is still outstanding.
 
+If workers ran before generation caught up, they leave a retryable
+``{root_id}.blocked.skeleton_not_exist`` marker in ``CF_CLOUDPATH`` for every cell
+whose skeleton did not exist yet. Re-run with ``--from-markers`` to rebuild a
+targeted generation call from exactly those ids (``skeleton_not_exist_ids``),
+wait, then re-insert / relaunch workers to pick them up.
+
 Run it with a profile:  ``poe generate_skeletons -e <profile>``.
 """
 
@@ -33,7 +39,7 @@ import pandas as pd
 from caveclient import CAVEclient
 
 from catacombs_task.paths import task_feather_path
-from catacombs_task.task import filter_tasks
+from catacombs_task.task import filter_tasks, skeleton_not_exist_ids
 
 # CAVE's generate_bulk_skeletons_async processes at most this many root_ids per
 # call (caveclient.skeletonservice.MAX_BULK_ASYNCHRONOUS_SKELETONS); larger runs
@@ -52,22 +58,43 @@ def main() -> None:
         help="Skip the confirmation prompt and submit immediately (for scripting). "
         "Via poe: `poe generate_skeletons -e <profile> -- --no-ask`.",
     )
+    parser.add_argument(
+        "--from-markers",
+        action="store_true",
+        help="Generate only the cells a worker skipped because their skeleton did "
+        "not exist yet (the `.blocked.skeleton_not_exist` markers in CF_CLOUDPATH), "
+        "instead of the whole feather. Use this to rebuild a targeted generation "
+        "call from a run's leftovers. Requires CF_CLOUDPATH. "
+        "Via poe: `poe generate_skeletons -e <profile> -- --from-markers`.",
+    )
     args = parser.parse_args()
     profile = args.profile
 
     parameter_filename = task_feather_path(profile)
     task_df = pd.read_feather(parameter_filename)
 
-    # Skip cells already assembled in the output dir, if one is configured, so a
-    # re-run only regenerates what is still outstanding (generation is otherwise
-    # idempotent, just wasteful).
     original_number = len(task_df)
     target_cloudpath = os.environ.get("CF_CLOUDPATH")
-    if target_cloudpath:
+    if args.from_markers:
+        # Re-request only what a prior run flagged as not-yet-generated. These
+        # markers are unresolved by construction, so no extra filter_tasks pass.
+        if not target_cloudpath:
+            print("--from-markers requires CF_CLOUDPATH to locate the markers.")
+            return
+        marker_ids = set(skeleton_not_exist_ids(target_cloudpath))
+        task_df = task_df[task_df["root_id"].isin(marker_ids)]
+    elif target_cloudpath:
+        # Skip cells already assembled in the output dir so a re-run only
+        # regenerates what is still outstanding (generation is otherwise
+        # idempotent, just wasteful).
         task_df = filter_tasks(task_df, target_cloudpath)
 
     if len(task_df) == 0:
-        print("No skeletons to generate!")
+        print(
+            "No skeletons flagged .blocked.skeleton_not_exist to regenerate!"
+            if args.from_markers
+            else "No skeletons to generate!"
+        )
         return
 
     datastack = task_df["datastack_name"].iloc[0]
@@ -86,10 +113,17 @@ def main() -> None:
     print(f"  datastack      : {datastack}")
     print(f"  skeleton ver   : {skeleton_version}")
     print(f"  feather        : {parameter_filename}")
-    print(
-        f"  root_ids       : {len(root_ids)} to generate "
-        f"({original_number - len(root_ids)} already assembled, skipped)"
-    )
+    if args.from_markers:
+        print("  source         : .blocked.skeleton_not_exist markers (--from-markers)")
+        print(
+            f"  root_ids       : {len(root_ids)} to generate "
+            f"({original_number - len(root_ids)} not flagged, skipped)"
+        )
+    else:
+        print(
+            f"  root_ids       : {len(root_ids)} to generate "
+            f"({original_number - len(root_ids)} already assembled, skipped)"
+        )
     print(f"  async requests : {n_chunks} chunk(s) of ≤{BULK_ASYNC_LIMIT}")
     print("───────────────────────────────────────────────────────")
 

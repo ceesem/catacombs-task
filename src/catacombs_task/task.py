@@ -43,49 +43,142 @@ session_config.set_session_defaults(
 # Output artifact extension. One ".osy" file is written per completed neuron.
 OSSIFY_EXTENSION = "osy"
 
-# Permanent, data-caused failure markers follow the convention
-# "{root_id}.err.<reason>": the id was tried and will never succeed on retry
-# (a property of the neuron, not a transient/server error). ``filter_tasks``
-# treats any such marker as resolved, so reruns don't re-enqueue it, and it is
-# NOT re-fetched. Add new reasons freely — the machinery keys off the "err"
+# Workers leave two kinds of mid-level marker, both of the form
+# "{root_id}.<kind>.<reason>" (root_ids have no dots; reasons may):
+#
+#  - err     : a *permanent*, data-caused failure. The id was tried and will
+#              never succeed on retry (a property of the neuron, not a
+#              transient/server error). ``is_resolved`` treats any ``err`` marker
+#              as done, so reruns don't re-enqueue it and it is not re-fetched.
+#  - blocked : a *retryable* block on an unmet precondition. The id was skipped
+#              this pass for a reason we expect to clear on a later run once the
+#              dependency is ready. NOT resolved — reruns re-enqueue it — but the
+#              marker records the id so a targeted follow-up can be rebuilt from
+#              exactly these markers (e.g. ``skeleton_not_exist_ids`` →
+#              generate_skeletons --from-markers).
+#
+# Add new reasons under either prefix freely — the machinery keys off the kind
 # segment, not the specific reason.
 ERR_PREFIX = "err"
-# Reasons wired up so far:
+BLOCKED_PREFIX = "blocked"
+
+# err reasons wired up so far:
 #  - singlet: single-vertex skeletons, too small for ossify's graph smoothing
 #    ("{root_id}.err.singlet").
 #  - invalid: a root id not valid at the batch's shared timestamp (a stale /
 #    outdated segment id — a data property, not a transient error), so it is
 #    dropped from the batch and marked permanently ("{root_id}.err.invalid").
+#  - processing: a per-cell processing stage (feature extraction / compartment
+#    assignment) raised a non-transient error — a deterministic property of this
+#    neuron that will fail identically on retry ("{root_id}.err.processing").
 SINGLET_EXTENSION = f"{ERR_PREFIX}.singlet"
 INVALID_EXTENSION = f"{ERR_PREFIX}.invalid"
+PROCESSING_ERROR_EXTENSION = f"{ERR_PREFIX}.processing"
+
+# blocked reasons wired up so far:
+#  - skeleton_not_exist: the root is valid but the CAVE skeleton service has not
+#    produced its skeleton yet, so the download-only batch loader returned no
+#    cell ("{root_id}.blocked.skeleton_not_exist"). Rebuild a targeted
+#    generate_skeletons call from these (see ``skeleton_not_exist_ids``).
+#  - server_error: a transient server/config error (a 503 storm, a timeout, a
+#    dropped connection) hit while loading or processing the cell — retryable,
+#    not a property of the neuron ("{root_id}.blocked.server_error"). The rich
+#    {filename}_{stage}_error.json sidecar keeps the traceback for diagnosis.
+SKELETON_NOT_EXIST_EXTENSION = f"{BLOCKED_PREFIX}.skeleton_not_exist"
+SERVER_ERROR_EXTENSION = f"{BLOCKED_PREFIX}.server_error"
+
+# Exception type names (``type(exc).__name__``) that are transient/server- or
+# config-caused rather than a property of the neuron's data. ``_record_error``
+# marks a failure of one of these ``.blocked.server_error`` (retryable) instead
+# of leaving only a data-caused sidecar; anything not listed here is treated as
+# data-caused. Extend as new transient types show up in a run.
+#
+# ServerIncompatibilityError is a caveclient API-version check; it usually rides
+# along with a 503 storm (a bad version read during a degraded window) and clears
+# on retry — hence "server". If it instead stays stuck and dominates, that's a
+# real client/server version mismatch to fix, not wait.
+SERVER_ERROR_TYPES = {
+    "HTTPError",  # nearly all are "503 Service Temporarily Unavailable"
+    "ConnectionError",
+    "ConnectTimeout",
+    "ReadTimeout",
+    "Timeout",
+    "ChunkedEncodingError",
+    "ProtocolError",
+    "MaxRetryError",
+    "SSLError",
+    "RemoteDisconnected",
+    "IncompleteRead",
+    "ServiceUnavailable",
+    "TooManyRequests",
+    "GatewayTimeout",
+    "ServerIncompatibilityError",
+}
+
+
+def marker_parts(filename: str) -> tuple[Optional[str], Optional[str]]:
+    """``(kind, reason)`` for a ``{root_id}.<kind>.<reason>`` marker whose kind is
+    ``ERR_PREFIX`` or ``BLOCKED_PREFIX``, else ``(None, None)``.
+
+    root_ids contain no dots, so the reason is everything after the kind segment
+    (reasons themselves may contain dots).
+    """
+    parts = filename.split(".")
+    if len(parts) >= 3 and parts[1] in (ERR_PREFIX, BLOCKED_PREFIX):
+        return parts[1], ".".join(parts[2:])
+    return None, None
 
 
 def is_resolved(filename: str) -> bool:
     """Whether an output-dir artifact means its root_id is done and must not be
     re-enqueued: a ``.osy`` output (success) or any ``{root_id}.err.<reason>``
-    marker (permanent, data-caused failure). ``*_error.json`` sidecars are
-    transient/retryable and are NOT resolved.
+    marker (permanent, data-caused failure). ``{root_id}.blocked.<reason>``
+    markers (retryable, e.g. ``.blocked.skeleton_not_exist``) and ``*_error.json``
+    sidecars are transient/retryable and are NOT resolved.
     """
     if filename.endswith(f".{OSSIFY_EXTENSION}"):
         return True
-    parts = filename.split(".")  # "<root_id>.err.<reason>"; root_ids have no dots
-    return len(parts) >= 3 and parts[1] == ERR_PREFIX
+    kind, _ = marker_parts(filename)
+    return kind == ERR_PREFIX
 
 
-def _record_error(cf, filename: str, stage: str, root_id: int, exc: Exception) -> None:
-    """Write a rich error sidecar and echo it to stderr.
+def _record_error(
+    cf,
+    filename: str,
+    stage: str,
+    root_id: int,
+    exc: Exception,
+    permanent_if_data: bool = False,
+) -> None:
+    """Write a rich error sidecar, stamp a state marker, and echo to stderr.
 
     Captures the exception type and full traceback (not just ``str(exc)``) so a
     failure can be diagnosed from the ``{filename}_{stage}_error.json`` sidecar
     alone. Must be called from within the ``except`` block so ``format_exc``
     sees the active exception. Echoing to stderr surfaces the same detail in a
     live worker's logs (``poe launch_worker`` / pod logs).
+
+    The exception is classified by type name (``SERVER_ERROR_TYPES``) to decide
+    what state marker to stamp alongside the sidecar:
+
+    - A transient/server error always gets a retryable
+      ``{root_id}.blocked.server_error`` marker, regardless of ``stage``.
+    - Otherwise, if ``permanent_if_data`` (set only by the per-cell processing
+      stage, where a non-transient failure is a deterministic property of this
+      neuron), a permanent ``{root_id}.err.processing`` marker so reruns stop
+      re-enqueueing it. Left unmarked (retryable via the sidecar alone) for
+      whole-batch load failures and uploads, where an unknown error is more
+      likely systemic/infra than a property of one neuron.
     """
     tb = traceback.format_exc()
     print(
         f"[{root_id}] {stage} failed: {type(exc).__name__}: {exc}\n{tb}",
         file=sys.stderr,
     )
+    if type(exc).__name__ in SERVER_ERROR_TYPES:
+        cf.put(f"{root_id}.{SERVER_ERROR_EXTENSION}", b"")
+    elif permanent_if_data:
+        cf.put(f"{root_id}.{PROCESSING_ERROR_EXTENSION}", b"")
     cf.put_json(
         f"{filename}_{stage}_error.json",
         {
@@ -114,21 +207,43 @@ def filter_tasks(task_df, cloudpath):
     return task_df[~task_df["root_id"].isin(done_ids)]
 
 
+def skeleton_not_exist_ids(cloudpath) -> list[int]:
+    """Root ids a worker skipped because their skeleton did not exist yet.
+
+    These carry a retryable ``{root_id}.blocked.skeleton_not_exist`` marker (see
+    ``_run_task``) and are exactly the ids to re-submit to the CAVE skeleton
+    service — so ``generate_skeletons`` can rebuild a targeted generation call
+    from a run's leftovers rather than re-enumerating the whole feather. Ids that
+    have since resolved (a ``.osy`` output or a permanent ``.err`` marker) are
+    excluded, so a stale marker left behind by a now-succeeded cell is not
+    re-requested. Returned sorted for a stable, readable ordering.
+    """
+    cf = CloudFiles(cloudpath)
+    marked: set[int] = set()
+    resolved: set[int] = set()
+    for f in cf.list():
+        kind, reason = marker_parts(f)
+        if kind == BLOCKED_PREFIX and reason == "skeleton_not_exist":
+            marked.add(int(f.split(".")[0]))
+        elif is_resolved(f):
+            resolved.add(int(f.split(".")[0]))
+    return sorted(marked - resolved)
+
+
 def _is_pending(cf, root_id: int) -> bool:
     """Whether ``root_id`` still needs processing in this output dir.
 
     A secondary, per-worker idempotency guard on top of ``filter_tasks`` (which
     dedups at insert time): if a batch is re-leased after a partial run, this
-    skips the cells that already resolved. Resolved means a ``.osy`` output or
-    one of the permanent ``.err.<reason>`` markers a worker writes.
+    skips the cells that already resolved. Resolved is the single ``is_resolved``
+    notion — a ``.osy`` output or any permanent ``.err.<reason>`` marker — so this
+    tracks new err reasons automatically and never diverges from ``filter_tasks``.
+    A retryable ``.blocked.<reason>`` marker is not resolved, so it stays pending.
+
+    One prefix-scoped listing (root_ids have no dots, so the trailing ``.`` can't
+    match a longer id) rather than a HEAD per candidate marker.
     """
-    if cf.exists(f"{root_id}.{OSSIFY_EXTENSION}"):
-        return False
-    if cf.exists(f"{root_id}.{SINGLET_EXTENSION}"):
-        return False
-    if cf.exists(f"{root_id}.{INVALID_EXTENSION}"):
-        return False
-    return True
+    return not any(is_resolved(f) for f in cf.list(prefix=f"{root_id}."))
 
 
 @taskqueue.queueable
@@ -149,10 +264,12 @@ def _run_task(
     The batch is loaded in one pooled call (``assemble_cell_batch``); each
     returned cell is then processed independently. Failures are caught and
     recorded per cell (JSON sidecars for transient errors, ``.err.<reason>``
-    markers for permanent ones) rather than raised, so a single bad neuron — or
-    a root that is invalid / not-yet-skeletonized — does not kill the batch or
-    the worker. Absence of ``{root_id}.osy`` (and of any ``.err`` marker) is the
-    signal that a neuron still needs processing (see ``filter_tasks``).
+    markers for permanent data-caused ones, ``.blocked.<reason>`` markers for
+    retryable blocks like a not-yet-generated skeleton) rather than raised, so a
+    single bad neuron — or a root that is invalid / not-yet-skeletonized — does
+    not kill the batch or the worker. Absence of ``{root_id}.osy`` (and of any
+    ``.err`` marker) is the signal that a neuron still needs processing (a
+    ``.blocked`` marker does not resolve it — see ``filter_tasks``).
     """
     cf = CloudFiles(cloudpath, progress=False)
 
@@ -198,8 +315,11 @@ def _run_task(
         )
     except Exception as e:
         # A whole-batch load failure (e.g. a pooled synapse query error) is
-        # transient: record a retryable sidecar for every pending root so a
-        # later insert_tasks re-enqueues them, and bail.
+        # treated as retryable for every pending root, so a later insert_tasks
+        # re-enqueues them: a diagnostic sidecar each, plus a .blocked.server_error
+        # marker when the error is transient/server-typed. Never permanent here —
+        # a batch-level failure is usually systemic, not one neuron's data, so we
+        # do not poison the whole batch with .err markers.
         for rid in pending:
             _record_error(cf, f"{rid}.{OSSIFY_EXTENSION}", "skeletonization", rid, e)
         return
@@ -207,8 +327,10 @@ def _run_task(
     # Roots the batch loader dropped (absent from the result). Classify them with
     # the same shared timestamp: not-latest is a permanent, data-caused failure
     # (mark it so reruns skip it); latest-but-missing means the skeleton has not
-    # been generated yet (transient — leave it unmarked so a rerun retries once
-    # the generate_skeletons pre-pass catches up).
+    # been generated yet, so we write a retryable .blocked.skeleton_not_exist
+    # marker — it does not resolve the id (a rerun retries once the
+    # generate_skeletons pre-pass catches up), but it records the id so a targeted
+    # generate_skeletons call can be rebuilt from these (see skeleton_not_exist_ids).
     missing = [rid for rid in pending if rid not in cells]
     if missing:
         valid_mask = client.chunkedgraph.is_latest_roots(missing, timestamp=ts)
@@ -216,9 +338,10 @@ def _run_task(
             if not is_valid:
                 cf.put(f"{rid}.{INVALID_EXTENSION}", b"")
             else:
+                cf.put(f"{rid}.{SKELETON_NOT_EXIST_EXTENSION}", b"")
                 print(
-                    f"[{rid}] skeleton not available yet (run generate_skeletons "
-                    "and wait); leaving for retry.",
+                    f"[{rid}] skeleton not generated yet (run generate_skeletons "
+                    "and wait); marked .blocked.skeleton_not_exist for retry.",
                     file=sys.stderr,
                 )
 
@@ -235,12 +358,20 @@ def _run_task(
             if compartment_model:
                 cell = assign_compartments(cell, compartment_model)
         except Exception as e:
-            _record_error(cf, filename, "skeletonization", rid, e)
+            # A non-transient failure here is a deterministic property of this
+            # neuron (bad geometry, a feature that can't be computed): mark it
+            # permanent so reruns stop re-enqueueing it. A transient/server error
+            # still falls through to a retryable .blocked.server_error marker.
+            _record_error(
+                cf, filename, "skeletonization", rid, e, permanent_if_data=True
+            )
             continue
 
         try:
             upload_cell(filename, cell, cloudpath)
         except Exception as e:
+            # Uploads fail on infra/config far more than on neuron data, so keep
+            # them retryable (sidecar, or .blocked.server_error if transient).
             _record_error(cf, filename, "upload", rid, e)
 
 

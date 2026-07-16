@@ -35,6 +35,7 @@ Every task/cluster command takes a **required** `-e/--env <profile>` selector
 | `poe launch_worker -e <profile>` | Launch a local worker process |
 | `poe launch_worker_docker -e <profile>` | Run a worker in the Docker image |
 | `poe check_filequeue -e <profile>` | Check filequeue status |
+| `poe cleanup_markers -e <profile>` | Delete stale `.blocked.*` markers for cells that have since resolved (`-- --dry-run` to preview) |
 | `poe reset_queue -e <profile>` | Reset the file queue |
 | `poe make_scripts -e <profile>` | Render Kubernetes scripts (optional; preview only — the cluster tasks auto-render) |
 | `poe launch_cluster -e <profile>` | Render scripts + create the GKE cluster (idempotent: if it already exists, resizes the node pool to `NUMBER_NODES`) |

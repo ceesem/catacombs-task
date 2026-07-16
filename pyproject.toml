@@ -107,6 +107,15 @@ help = "Report processed (done) vs outstanding tasks for a profile (e.g. -e v1dd
     help = "Config profile under config/ (e.g. v1dd, microns)"
     options = ['-e', '--env']
 
+[tool.poe.tasks.cleanup_markers]
+cmd = "uv run --env-file config/common.env --env-file config/${env}/task.env --frozen cleanup_markers.py ${env}"
+help = "Delete stale .blocked.* markers for resolved cells (add -- --dry-run to preview)"
+    [[tool.poe.tasks.cleanup_markers.args]]
+    name = "env"
+    required = true
+    help = "Config profile under config/ (e.g. v1dd, microns)"
+    options = ['-e', '--env']
+
 [tool.poe.tasks.launch_worker]
 cmd = "uv run --env-file config/common.env --env-file config/${env}/task.env --frozen run.py"
 help = "Launch a local worker for a config profile (e.g. -e v1dd)"

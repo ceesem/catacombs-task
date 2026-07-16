@@ -7,17 +7,21 @@ An id is **processed** (done — the outcome won't change on retry) when it has
 either:
 
   - a ``.osy`` output (assembled successfully), or
-  - any ``{root_id}.err.<reason>`` marker or a *data-caused* ``*_error.json``
-    sidecar — a failure that is a property of the neuron itself.
+  - a *permanent* ``{root_id}.err.<reason>`` marker or a *data-caused*
+    ``*_error.json`` sidecar — a failure that is a property of the neuron itself.
 
-An id is **outstanding** when it hit a *server-caused* error (transient/config,
-which the workers retry and which should eventually succeed) or hasn't been
-attempted yet. This is the same "done" notion as ``task.is_resolved`` /
-``filter_tasks``, extended to fold in data-caused error sidecars and to break
+An id is **outstanding** when it carries a *retryable* ``.blocked.<reason>``
+marker — ``.blocked.skeleton_not_exist`` (needs a generate_skeletons pass) or
+``.blocked.server_error`` (a transient/config error the workers retry) — or
+hasn't been attempted yet. This is the same "done" notion as ``task.is_resolved``
+/ ``filter_tasks``, extended to fold in data-caused error sidecars and to break
 the counts down by cause.
 
-The data-vs-server split is the point: a data failure is real progress; a
-server failure is not (it will be retried).
+The data-vs-blocked split is the point: a data failure is real progress; a
+blocked id is not (it will be retried). Workers stamp transient failures with a
+``.blocked.server_error`` marker, so most classification is from the object
+names alone; only unmarked ``*_error.json`` sidecars are fetched, to tell a
+data-caused failure (permanent) from a stray server one (folded into blocked).
 
 Run it with a profile:  poe check_progress -e <profile>
 """
@@ -31,34 +35,18 @@ import pandas as pd
 from cloudfiles import CloudFiles
 
 from catacombs_task.paths import task_feather_path
-from catacombs_task.task import ERR_PREFIX, OSSIFY_EXTENSION
+from catacombs_task.task import (
+    BLOCKED_PREFIX,
+    ERR_PREFIX,
+    OSSIFY_EXTENSION,
+    SERVER_ERROR_TYPES,
+    marker_parts,
+)
 
-# error_type values (from the *_error.json sidecars) that are transient/server-
-# or config-caused rather than a property of the neuron's data. These are NOT
-# counted as processed: the workers retry them and they should eventually
-# succeed. Any error_type NOT listed here is treated as data-caused (permanent)
-# — extend this set as new transient types show up in a run.
-#
-# ServerIncompatibilityError is a caveclient API-version check; it usually rides
-# along with a 503 storm (a bad version read during a degraded window) and
-# clears on retry — hence "server". If it instead stays stuck and dominates the
-# server bucket, that's a real client/server version mismatch to fix, not wait.
-SERVER_ERROR_TYPES = {
-    "HTTPError",  # nearly all are "503 Service Temporarily Unavailable"
-    "ConnectionError",
-    "ConnectTimeout",
-    "ReadTimeout",
-    "Timeout",
-    "ChunkedEncodingError",
-    "ProtocolError",
-    "MaxRetryError",
-    "SSLError",
-    "RemoteDisconnected",
-    "IncompleteRead",
-    "ServiceUnavailable",
-    "TooManyRequests",
-    "GatewayTimeout",
-    "ServerIncompatibilityError",
+# One-line hint printed next to each outstanding .blocked.<reason> count.
+BLOCKED_HINTS = {
+    "skeleton_not_exist": "run generate_skeletons --from-markers",
+    "server_error": "transient/server — will retry",
 }
 
 
@@ -90,32 +78,45 @@ def main() -> None:
     total = len(all_ids)
 
     # One pass over the output listing: bucket artifacts by kind from the name
-    # alone (no fetch needed for .osy / .err.<reason> markers).
+    # alone (no fetch needed for .osy / .err.<reason> / .blocked.<reason> markers).
+    # err markers are permanent (data-caused, count as processed); blocked markers
+    # are retryable (outstanding — see task.is_resolved).
     cf = CloudFiles(cloudpath)
     osy_ids: set[int] = set()
     err_ids_by_reason: dict[str, set[int]] = {}
+    blocked_ids_by_reason: dict[str, set[int]] = {}
     error_files: list[str] = []
     for f in cf.list():
         if f.endswith(f".{OSSIFY_EXTENSION}"):
             osy_ids.add(_root_id(f))
             continue
-        parts = f.split(".")
-        if len(parts) >= 3 and parts[1] == ERR_PREFIX:  # "<id>.err.<reason>"
-            err_ids_by_reason.setdefault(".".join(parts[2:]), set()).add(_root_id(f))
+        kind, reason = marker_parts(f)
+        if kind == ERR_PREFIX:
+            err_ids_by_reason.setdefault(reason, set()).add(_root_id(f))
+        elif kind == BLOCKED_PREFIX:
+            blocked_ids_by_reason.setdefault(reason, set()).add(_root_id(f))
         elif f.endswith("error.json"):
             error_files.append(f)
 
-    marker_ids: set[int] = (
+    perm_marker_ids: set[int] = (
         set().union(*err_ids_by_reason.values()) if err_ids_by_reason else set()
+    )
+    blocked_ids: set[int] = (
+        set().union(*blocked_ids_by_reason.values()) if blocked_ids_by_reason else set()
     )
 
     # Classify error sidecars by fetching their JSON — only for ids not already
-    # resolved by a .osy or an .err.<reason> marker. This is the only step that
-    # reads object contents.
+    # accounted for by a .osy or an .err/.blocked marker. This is the only step
+    # that reads object contents. Workers now write a .blocked.server_error marker
+    # for transient failures, so the classified sidecars are usually all
+    # data-caused; a server-typed sidecar with no marker (e.g. from an older run)
+    # is folded into the blocked "server_error" bucket for a single coherent count.
     to_classify = [
         f
         for f in error_files
-        if _root_id(f) not in osy_ids and _root_id(f) not in marker_ids
+        if _root_id(f) not in osy_ids
+        and _root_id(f) not in perm_marker_ids
+        and _root_id(f) not in blocked_ids
     ]
     errjson_data_ids: set[int] = set()
     server_err_ids: set[int] = set()
@@ -132,15 +133,19 @@ def main() -> None:
         # well-defined exclusion.
         target = server_err_ids if etype in SERVER_ERROR_TYPES else errjson_data_ids
         target.add(fid)
+    if server_err_ids:
+        blocked_ids_by_reason.setdefault("server_error", set()).update(server_err_ids)
+        blocked_ids |= server_err_ids
 
-    # Precedence: success (.osy) > data-permanent (marker or data sidecar) >
-    # server-retryable. Everything intersected with the actual task list.
+    # Precedence: success (.osy) > data-permanent (.err marker or data sidecar) >
+    # blocked (.blocked.<reason>, retryable). Everything intersected with the
+    # actual task list.
     success = osy_ids & all_ids
-    marker_ids = (marker_ids & all_ids) - osy_ids
-    errjson_data_ids = (errjson_data_ids & all_ids) - osy_ids - marker_ids
-    data_perm = marker_ids | errjson_data_ids
-    server_pending = (server_err_ids & all_ids) - osy_ids - data_perm
-    not_attempted = total - len(success | data_perm | server_pending)
+    perm_marker_ids = (perm_marker_ids & all_ids) - osy_ids
+    errjson_data_ids = (errjson_data_ids & all_ids) - osy_ids - perm_marker_ids
+    data_perm = perm_marker_ids | errjson_data_ids
+    blocked_ids = (blocked_ids & all_ids) - osy_ids - data_perm
+    not_attempted = total - len(success | data_perm | blocked_ids)
 
     processed = len(success) + len(data_perm)
     outstanding = total - processed
@@ -167,9 +172,10 @@ def main() -> None:
         f"          error sidecar : {len(errjson_data_ids)}   (data-caused *_error.json)"
     )
     print(f"  outstanding      : {outstanding}")
-    print(
-        f"      server/retry : {len(server_pending)}   (transient/config — will retry)"
-    )
+    for reason in sorted(blocked_ids_by_reason):
+        n = len((blocked_ids_by_reason[reason] & all_ids) - osy_ids - data_perm)
+        hint = BLOCKED_HINTS.get(reason, "retryable")
+        print(f"      .blocked.{reason:<18}: {n}   ({hint})")
     print(f"      not attempted: {not_attempted}")
 
     if prev and prev.get("epoch") and now_dt.timestamp() > prev["epoch"]:
