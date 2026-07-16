@@ -83,6 +83,59 @@ def assemble_cell(
     )
 
 
+def assemble_cell_batch(
+    root_ids: list[int],
+    client,
+    *,
+    restore_properties: bool = True,
+    reference_tables: Optional[list[str]] = None,
+    reference_suffixes: Optional[dict] = None,
+    skeleton_version: int = 4,
+    timestamp=None,
+) -> dict[int, ossify.Cell]:
+    """Rehydrate many CAVE skeletons in one pooled batch (the ``ossify`` 0.2.1 path).
+
+    The batch equivalent of :func:`assemble_cell`: it uses the same ossify options
+    but pools the synapse and L2-property fetches across the whole batch into a few
+    queries (~1.5x throughput at N=10), returning ``{root_id: Cell}``.
+
+    Two behaviours differ from the single-cell loader and are deliberate:
+
+    - Skeletons are only ever *downloaded*, never generated inline: ossify 0.2.1
+      fetches cached skeletons via ``client.skeleton.fetch_skeletons`` (default
+      ``skeleton_download_method="gcs"``, pulling H5 files straight from the storage
+      bucket with a downscoped token, which bypasses the skeleton service's bulk
+      rate limit). This assumes a prior ``generate_bulk_skeletons_async`` pre-pass
+      (see ``generate_skeletons.py``); roots whose skeleton is not yet cached are
+      simply absent from the result.
+    - ``skip_invalid=True`` + one shared ``timestamp`` — all roots are validated
+      against a single timestamp; those not valid at it are dropped rather than
+      raising, so one bad root never sinks the batch. Roots dropped for either
+      reason are absent from the returned dict; the caller (``_run_task``)
+      re-classifies them (permanent-invalid vs skeleton-not-ready-yet).
+    """
+    if reference_tables is None:
+        reference_tables = DEFAULT_REFERENCE_TABLES
+
+    return ossify.load_cell_batch_from_client(
+        root_ids,
+        client,
+        synapses=True,
+        reference_tables=reference_tables,
+        reference_suffixes=reference_suffixes or {},
+        restore_graph=False,
+        restore_properties=restore_properties,
+        omit_self_synapses=True,
+        skeleton_version=skeleton_version,
+        timestamp=timestamp,
+        skip_invalid=True,
+        # Pin the GCS-direct download (H5 from the bucket via a downscoped token)
+        # rather than relying on the default: it bypasses the skeleton service's
+        # bulk request rate limit, which is what makes the fan-out viable.
+        skeleton_download_method="gcs",
+    )
+
+
 def extract_features(cell: ossify.Cell) -> ossify.Cell:
     """Attach derived per-vertex skeleton features (mutates and returns ``cell``).
 

@@ -2,9 +2,10 @@
 
 This is the queue *producer*: it reads the feather built by
 ``build_tasks.py`` (one row per ``root_id``, columns matching the
-``_run_task`` signature in ``src/catacombs_task/task.py``), turns each row into
-a queued task, and inserts them into the queue at ``TASKQUEUE_PATH``. Workers
-(``run.py``) later pull and run them.
+``_run_task`` signature in ``src/catacombs_task/task.py``), groups the rows into
+batches of ``TASK_BATCH_SIZE`` cells, turns each batch into a queued task, and
+inserts them into the queue at ``TASKQUEUE_PATH``. Workers (``run.py``) later
+pull and run them, loading each batch in one pooled ossify call.
 
 Configuration comes entirely from the environment, layered by the ``poe`` task
 as ``config/common.env`` + ``config/<profile>/task.env`` (see
@@ -12,6 +13,7 @@ as ``config/common.env`` + ``config/<profile>/task.env`` (see
 
     CF_CLOUDPATH              CloudFiles output dir; also used to skip finished tasks
     TASKQUEUE_PATH            queue to insert into (SQS URL, fq:// path, …)
+    TASK_BATCH_SIZE           cells per queued task (default 10)
 
 The task feather is located by ``task_feather_path(profile)`` — the same path
 ``build_tasks.py`` writes — so it is derived from the profile name and needs no
@@ -78,6 +80,12 @@ def main() -> None:
     # and the queue URL are frozen into each task here (not read from the env at
     # run time), so a stale CF_CLOUDPATH silently misdirects every output and its
     # error sidecar. Surfacing them here is the cheapest guard against that drift.
+    # Cells are grouped into batches of BATCH_SIZE cells per queued task; the
+    # worker loads each batch in one pooled ossify call (see task.py). N=10 is
+    # the measured throughput sweet spot; override via TASK_BATCH_SIZE.
+    batch_size = int(os.environ.get("TASK_BATCH_SIZE", "10"))
+    n_batches = -(-len(task_df) // batch_size)  # ceil division
+
     datastack = task_df["datastack_name"].iloc[0] if len(task_df) else "(n/a)"
     print("── insert_tasks ──────────────────────────────────────")
     print(f"  profile   : {profile}")
@@ -86,9 +94,10 @@ def main() -> None:
     print(f"  datastack : {datastack}")
     print(f"  feather   : {parameter_filename}")
     print(
-        f"  tasks     : {len(task_df)} to insert "
+        f"  cells     : {len(task_df)} to insert "
         f"({original_number - len(task_df)} already done, skipped)"
     )
+    print(f"  tasks     : {n_batches} batches of ≤{batch_size} cells")
     print("───────────────────────────────────────────────────────")
 
     if len(task_df) == 0:
@@ -110,11 +119,20 @@ def main() -> None:
             print("Aborted; nothing inserted.")
             return
 
-    # Each row's columns become keyword arguments to _run_task.
-    task_args = task_df.to_dict(orient="records")
+    # Group the one-row-per-cell records into batches of `batch_size`. Every
+    # column except root_id is a constant broadcast across the run (see
+    # build_tasks.py), so the first record of a chunk carries the shared kwargs;
+    # root_id is collected into the `root_ids` list _run_task expects.
+    records = task_df.to_dict(orient="records")
+    batches = [records[i : i + batch_size] for i in range(0, len(records), batch_size)]
+
+    def _payload(chunk):
+        shared = {k: v for k, v in chunk[0].items() if k != "root_id"}
+        return run_task(root_ids=[int(r["root_id"]) for r in chunk], **shared)
+
     tq = TaskQueue(os.environ.get("TASKQUEUE_PATH"))
-    tasks = (run_task(**task) for task in task_args)
-    tq.insert(tasks, total=len(task_args))
+    tasks = (_payload(chunk) for chunk in batches)
+    tq.insert(tasks, total=len(batches))
 
 
 if __name__ == "__main__":

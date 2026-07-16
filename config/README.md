@@ -59,7 +59,7 @@ profile's `task.env` or `cluster.env`.
 
 | File | Role | Typical contents |
 |------|------|------------------|
-| `common.env` | *How to run* — same for every dataset | `TQ_LEASE_SECONDS`, `GOOGLE_PROJECT_NAME`, network/zone/machine type, `NUMBER_NODES`, `PODS_PER_NODE`, `TASK_DOCKER_IMAGE`, `TASK_REPLICAS`, memory/CPU requests & limits |
+| `common.env` | *How to run* — same for every dataset | `TQ_LEASE_SECONDS`, `TASK_BATCH_SIZE`, `GOOGLE_PROJECT_NAME`, network/zone/machine type, `NUMBER_NODES`, `PODS_PER_NODE`, `TASK_DOCKER_IMAGE`, `TASK_REPLICAS`, memory/CPU requests & limits |
 | `<env>/task.env` | *Which data / servers* | `TASKQUEUE_PATH`, `CF_CLOUDPATH`, `DATASTACK_NAME`, `SERVER_ADDRESS`, `SKELETON_VERSION`, `RESTORE_PROPERTIES`, `REFERENCE_TABLES_MAP`, `COMPARTMENT_MODEL`, `CAVE_GLOBAL_SERVER`, `CAVE_LOCAL_SERVER` (+ optional `TASK_PARAMETER_FILENAME` override) |
 | `<env>/cluster.env` | *Cluster identity* | `TASK_NAME`, `GOOGLE_CLUSTER_NAME` (+ any per-dataset overrides) |
 | `<env>/build.py` | *How to pick neurons* | a single `get_root_ids(client) -> list[int]` function |
@@ -87,8 +87,9 @@ mkdir config/<name>
 cp config/microns_v1822/task.env config/microns_v1822/cluster.env config/<name>/
 cp config/examples/build.py.example config/<name>/build.py
 # edit the copies for the new dataset/server, fill in build.py's get_root_ids, then:
-poe build_tasks  -e <name>     # writes config/<name>/tasks/<name>.feather
-poe insert_tasks -e <name>
+poe build_tasks        -e <name>   # writes config/<name>/tasks/<name>.feather
+poe generate_skeletons -e <name>   # pre-generate skeletons server-side, then wait
+poe insert_tasks       -e <name>   # seed the queue in batches of TASK_BATCH_SIZE cells
 ```
 
 Note there is no feather path to fix up in the copied `task.env` — it is derived

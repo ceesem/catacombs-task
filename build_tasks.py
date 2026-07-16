@@ -4,14 +4,15 @@ This is the *dynamic task* side of the pipeline: it enumerates the units of
 work (one row per ``root_id``) and stamps the per-task parameters. Each column
 becomes a keyword argument to ``_run_task`` in ``src/catacombs_task/task.py``:
 
-    root_id            (int)       required   the neuron to assemble
-    datastack_name     (str)       required   CAVE datastack        (DATASTACK_NAME)
-    server_address     (str)       required   CAVE global server    (SERVER_ADDRESS)
-    restore_properties (bool)      optional   full L2-cache props   (RESTORE_PROPERTIES)
-    skeleton_version   (int)       optional   skeleton-service ver  (SKELETON_VERSION)
-    reference_tables   (list[str]) optional   synapse ref tables    (REFERENCE_TABLES_MAP keys)
-    reference_suffixes (dict)      optional   ref-table col suffixes (REFERENCE_TABLES_MAP)
-    compartment_model  (str)       optional   axon/dendrite model   (COMPARTMENT_MODEL)
+    root_id                 (int)       required   the neuron to assemble
+    datastack_name          (str)       required   CAVE datastack        (DATASTACK_NAME)
+    server_address          (str)       required   CAVE global server    (SERVER_ADDRESS)
+    restore_properties      (bool)      optional   full L2-cache props   (RESTORE_PROPERTIES)
+    skeleton_version        (int)       optional   skeleton-service ver  (SKELETON_VERSION)
+    materialization_version (int)       optional   pinned CAVE mat. ver  (client.version set in build.py)
+    reference_tables        (list[str]) optional   synapse ref tables    (REFERENCE_TABLES_MAP keys)
+    reference_suffixes      (dict)      optional   ref-table col suffixes (REFERENCE_TABLES_MAP)
+    compartment_model       (str)       optional   axon/dendrite model   (COMPARTMENT_MODEL)
 
 The two optional columns are only stamped when their profile value is set;
 otherwise ``_run_task`` uses its own defaults (no reference tables, and the
@@ -123,11 +124,20 @@ def main() -> None:
     client = CAVEclient(datastack, server_address=server)
     root_ids = recipe.get_root_ids(client)
 
+    # Capture the materialization version the recipe pinned (recipes set
+    # ``client.version`` in get_root_ids — see config/<profile>/build.py). Stamping
+    # it into the feather locks the query timestamp for the whole run: the ids were
+    # enumerated at this snapshot, and every batch a worker later loads shares the
+    # same timestamp. None (recipe left it unpinned) falls back to latest.
+    materialization_version = client.version
+
     task_df = pd.DataFrame({"root_id": pd.array(root_ids, dtype="int64")})
     task_df["datastack_name"] = datastack
     task_df["server_address"] = server
     task_df["restore_properties"] = restore_properties
     task_df["skeleton_version"] = skeleton_version
+    if materialization_version is not None:
+        task_df["materialization_version"] = int(materialization_version)
     if reference_tables_map:
         # Same values on every row (constant across the run); _run_task coerces
         # them back to a plain list / dict.

@@ -7,9 +7,13 @@ This module intentionally holds *no* ossify logic — that lives in
 - wrap it as a partial for the queue producer (``run_task``),
 - decide which tasks can be skipped (``filter_tasks``).
 
-Each task is one ``root_id``. Parameters come from the columns of the task
-dataframe (see ``insert_tasks.py``): every column name is passed as a keyword
-argument to ``_run_task``.
+Each task is one *batch* of ``root_ids`` (``insert_tasks.py`` groups the feather's
+one-row-per-cell records into chunks of ``TASK_BATCH_SIZE``). The batch loader
+pools the per-cell fetches into a few queries; the worker then processes each
+returned cell independently so one bad cell never sinks the rest of the batch.
+The shared per-task parameters come from the columns of the task dataframe (see
+``build_tasks.py``): every column name except ``root_id`` is passed as a keyword
+argument to ``_run_task`` (``root_id`` becomes the ``root_ids`` list).
 """
 
 import sys
@@ -23,7 +27,7 @@ from caveclient import CAVEclient, session_config
 from cloudfiles import CloudFiles
 
 from catacombs_task.processing import (
-    assemble_cell,
+    assemble_cell_batch,
     assign_compartments,
     extract_features,
     upload_cell,
@@ -46,9 +50,14 @@ OSSIFY_EXTENSION = "osy"
 # NOT re-fetched. Add new reasons freely — the machinery keys off the "err"
 # segment, not the specific reason.
 ERR_PREFIX = "err"
-# The one reason wired up so far: single-vertex skeletons, too small for
-# ossify's graph smoothing — "{root_id}.err.singlet".
+# Reasons wired up so far:
+#  - singlet: single-vertex skeletons, too small for ossify's graph smoothing
+#    ("{root_id}.err.singlet").
+#  - invalid: a root id not valid at the batch's shared timestamp (a stale /
+#    outdated segment id — a data property, not a transient error), so it is
+#    dropped from the batch and marked permanently ("{root_id}.err.invalid").
 SINGLET_EXTENSION = f"{ERR_PREFIX}.singlet"
+INVALID_EXTENSION = f"{ERR_PREFIX}.invalid"
 
 
 def is_resolved(filename: str) -> bool:
@@ -105,9 +114,26 @@ def filter_tasks(task_df, cloudpath):
     return task_df[~task_df["root_id"].isin(done_ids)]
 
 
+def _is_pending(cf, root_id: int) -> bool:
+    """Whether ``root_id`` still needs processing in this output dir.
+
+    A secondary, per-worker idempotency guard on top of ``filter_tasks`` (which
+    dedups at insert time): if a batch is re-leased after a partial run, this
+    skips the cells that already resolved. Resolved means a ``.osy`` output or
+    one of the permanent ``.err.<reason>`` markers a worker writes.
+    """
+    if cf.exists(f"{root_id}.{OSSIFY_EXTENSION}"):
+        return False
+    if cf.exists(f"{root_id}.{SINGLET_EXTENSION}"):
+        return False
+    if cf.exists(f"{root_id}.{INVALID_EXTENSION}"):
+        return False
+    return True
+
+
 @taskqueue.queueable
 def _run_task(
-    root_id: int,
+    root_ids: list[int],
     cloudpath: str,
     datastack_name: str,
     server_address: str,
@@ -116,27 +142,49 @@ def _run_task(
     reference_suffixes: Optional[dict] = None,
     compartment_model: Optional[str] = None,
     skeleton_version: int = 4,
+    materialization_version: Optional[int] = None,
 ):
-    """Assemble one neuron's ossify cell and upload it.
+    """Assemble a batch of neurons' ossify cells and upload one ``.osy`` each.
 
-    Failures are caught and recorded as JSON sidecars rather than raised, so a
-    single bad neuron does not kill the worker. Absence of ``{root_id}.osy`` is
-    the signal that the neuron still needs processing (see ``filter_tasks``).
+    The batch is loaded in one pooled call (``assemble_cell_batch``); each
+    returned cell is then processed independently. Failures are caught and
+    recorded per cell (JSON sidecars for transient errors, ``.err.<reason>``
+    markers for permanent ones) rather than raised, so a single bad neuron — or
+    a root that is invalid / not-yet-skeletonized — does not kill the batch or
+    the worker. Absence of ``{root_id}.osy`` (and of any ``.err`` marker) is the
+    signal that a neuron still needs processing (see ``filter_tasks``).
     """
     cf = CloudFiles(cloudpath, progress=False)
-    filename = f"{root_id}.{OSSIFY_EXTENSION}"
-    singlet_marker = f"{root_id}.{SINGLET_EXTENSION}"
 
-    # Idempotency: skip neurons already assembled (.osy) or already found to be
-    # a single-vertex skeleton (.singlet) in a previous run.
-    if cf.exists(filename) or cf.exists(singlet_marker):
+    # taskqueue may hand back a single scalar or a numpy array depending on how
+    # the payload was serialized; normalize to a plain list of python ints.
+    root_ids = [int(r) for r in np.atleast_1d(root_ids)]
+
+    # Idempotency: only process root_ids not already resolved (see _is_pending).
+    pending = [rid for rid in root_ids if _is_pending(cf, rid)]
+    if not pending:
         return
 
-    client = CAVEclient(datastack_name, server_address=server_address)
+    # Pin the materialization version stamped in at build time (coerced to a
+    # plain int — the version setter rejects numpy ints). This locks the query
+    # timestamp so every batch across the run shares one consistent snapshot;
+    # None falls back to the latest version.
+    client = CAVEclient(
+        datastack_name,
+        server_address=server_address,
+        version=int(materialization_version)
+        if materialization_version is not None
+        else None,
+    )
+
+    # One shared timestamp for the whole batch (the pinned version's frozen
+    # timestamp when set): used both to load the cells and (below) to classify
+    # any roots the loader drops, so the two agree.
+    ts = client.materialize.get_timestamp()
 
     try:
-        cell = assemble_cell(
-            root_id,
+        cells = assemble_cell_batch(
+            pending,
             client,
             restore_properties=restore_properties,
             reference_tables=(
@@ -146,26 +194,54 @@ def _run_task(
                 dict(reference_suffixes) if reference_suffixes is not None else None
             ),
             skeleton_version=skeleton_version,
+            timestamp=ts,
         )
-        # Single-vertex skeletons are too small for any downstream analysis (and
-        # crash ossify's graph smoothing). Record a marker that this id was tried
-        # and stop before feature extraction / upload; the marker keeps reruns
-        # from re-fetching it (see ``filter_tasks``).
-        if len(cell.s.vertex_df) <= 1:
-            cf.put(singlet_marker, b"")
-            return
-        cell = extract_features(cell)
-        if compartment_model:
-            cell = assign_compartments(cell, compartment_model)
     except Exception as e:
-        _record_error(cf, filename, "skeletonization", root_id, e)
+        # A whole-batch load failure (e.g. a pooled synapse query error) is
+        # transient: record a retryable sidecar for every pending root so a
+        # later insert_tasks re-enqueues them, and bail.
+        for rid in pending:
+            _record_error(cf, f"{rid}.{OSSIFY_EXTENSION}", "skeletonization", rid, e)
         return
 
-    try:
-        upload_cell(filename, cell, cloudpath)
-    except Exception as e:
-        _record_error(cf, filename, "upload", root_id, e)
-    return
+    # Roots the batch loader dropped (absent from the result). Classify them with
+    # the same shared timestamp: not-latest is a permanent, data-caused failure
+    # (mark it so reruns skip it); latest-but-missing means the skeleton has not
+    # been generated yet (transient — leave it unmarked so a rerun retries once
+    # the generate_skeletons pre-pass catches up).
+    missing = [rid for rid in pending if rid not in cells]
+    if missing:
+        valid_mask = client.chunkedgraph.is_latest_roots(missing, timestamp=ts)
+        for rid, is_valid in zip(missing, valid_mask):
+            if not is_valid:
+                cf.put(f"{rid}.{INVALID_EXTENSION}", b"")
+            else:
+                print(
+                    f"[{rid}] skeleton not available yet (run generate_skeletons "
+                    "and wait); leaving for retry.",
+                    file=sys.stderr,
+                )
+
+    for rid, cell in cells.items():
+        filename = f"{rid}.{OSSIFY_EXTENSION}"
+        try:
+            # Single-vertex skeletons are too small for any downstream analysis
+            # (and crash ossify's graph smoothing). Mark that this id was tried
+            # and skip it; the marker keeps reruns from re-fetching it.
+            if len(cell.s.vertex_df) <= 1:
+                cf.put(f"{rid}.{SINGLET_EXTENSION}", b"")
+                continue
+            cell = extract_features(cell)
+            if compartment_model:
+                cell = assign_compartments(cell, compartment_model)
+        except Exception as e:
+            _record_error(cf, filename, "skeletonization", rid, e)
+            continue
+
+        try:
+            upload_cell(filename, cell, cloudpath)
+        except Exception as e:
+            _record_error(cf, filename, "upload", rid, e)
 
 
 def run_task(*args, **kwargs):

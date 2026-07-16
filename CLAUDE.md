@@ -30,7 +30,8 @@ Every task/cluster command takes a **required** `-e/--env <profile>` selector
 | Command | Description |
 |---------|-------------|
 | `poe build_tasks -e <profile>` | Build the task feather for a profile |
-| `poe insert_tasks -e <profile>` | Insert tasks into the task queue |
+| `poe generate_skeletons -e <profile>` | Pre-generate skeletons server-side (run after build, before insert) |
+| `poe insert_tasks -e <profile>` | Insert tasks into the task queue (batches of `TASK_BATCH_SIZE` cells) |
 | `poe launch_worker -e <profile>` | Launch a local worker process |
 | `poe launch_worker_docker -e <profile>` | Run a worker in the Docker image |
 | `poe check_filequeue -e <profile>` | Check filequeue status |
@@ -49,7 +50,8 @@ Workers pull tasks from a queue (filequeue for local dev, cloud queue for produc
 1. Implement your task logic in `src/catacombs_task/task.py`
 2. Configure a profile under `config/<profile>/` (`task.env` + `cluster.env` + `build.py`), layered on `config/common.env` — see `config/README.md`
 3. Build the task feather: `poe build_tasks -e <profile>`
-4. Insert tasks: `poe insert_tasks -e <profile>`
+4. Pre-generate skeletons: `poe generate_skeletons -e <profile>`, then **wait** for the CAVE skeleton service to finish. Workers only download skeletons (via ossify's batch loader); they do not generate them on demand.
+5. Insert tasks: `poe insert_tasks -e <profile>` — cells are grouped into batches of `TASK_BATCH_SIZE` (default 10) per queued task; each worker loads a whole batch in one pooled ossify call.
 
 ### Kubernetes Deployment
 

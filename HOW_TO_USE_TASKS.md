@@ -32,10 +32,18 @@ Every `poe` task takes a single, **required** `-e/--env <name>` selector that
 names the profile — there is no default:
 
 ```bash
-poe build_tasks   -e microns_v1822
-poe insert_tasks  -e microns_v1822
-poe deploy_task   -e microns_v1822
+poe build_tasks        -e microns_v1822
+poe generate_skeletons -e microns_v1822   # then wait for the skeleton service to finish
+poe insert_tasks       -e microns_v1822
+poe deploy_task        -e microns_v1822
 ```
+
+`generate_skeletons` is a pre-pass: workers assemble cells with ossify's batch
+loader, which only *downloads* skeletons the CAVE skeleton service has already
+produced — it does not generate them on demand. So kick off generation, wait for
+the backend to catch up, then insert. `insert_tasks` groups cells into batches of
+`TASK_BATCH_SIZE` (default 10, in `common.env`) per queued task; each worker
+loads a whole batch in one pooled call (~1.5x throughput).
 
 See `config/README.md` for the full layout and what belongs in each file.
 
@@ -63,11 +71,11 @@ The config that defines how to populate and run the queue lives in a profile's `
 - **How to run** — `TASKQUEUE_PATH` (the queue) and `TQ_LEASE_SECONDS` (per-task timeout). Decide on a queue by reading the [python-task-queue](https://github.com/seung-lab/python-task-queue) documentation, then set `TASKQUEUE_PATH` to the path that defines it (e.g. an https URL for an SQS queue or an `fq://` path for a filequeue). Workers look at this queue to find tasks, and a task is reclaimed if it takes longer than `TQ_LEASE_SECONDS`.
 - **Which data** — the values `build_tasks.py` stamps onto every row of the task feather: `DATASTACK_NAME`, `SERVER_ADDRESS`, `SKELETON_VERSION`, `RESTORE_PROPERTIES`, and the optional `REFERENCE_TABLES_MAP` (comma-separated `table:suffix` pairs — keys are the reference tables, values their column suffixes) and `COMPARTMENT_MODEL`. Plus `CF_CLOUDPATH` (the output location). The feather's own path is derived from the profile name (see below), so it isn't a value you set. See `config/README.md` for the full table.
 
-To generate the queue you build a pandas dataframe where each row is one task and each column name matches a `_run_task` keyword, then save it as a feather. **`build_tasks.py` does this for you** — you never write the boilerplate. Running `poe build_tasks -e <profile>`:
+To generate the queue you build a pandas dataframe with one row per cell (each column name matches a `_run_task` keyword; `insert_tasks.py` later groups the rows into batches), then save it as a feather. **`build_tasks.py` does this for you** — you never write the boilerplate. Running `poe build_tasks -e <profile>`:
 
 1. loads `config/common.env` + `config/<profile>/task.env` into the environment;
 2. imports the profile's `config/<profile>/build.py` and calls its `get_root_ids(client) -> list[int]` — the *only* per-dataset code you write;
-3. stamps the "which data" values above onto one row per returned `root_id`;
+3. stamps the "which data" values above onto one row per returned `root_id`, plus the materialization version the recipe pinned (`client.version`, captured after selection) so the whole run shares one locked query timestamp;
 4. writes the feather to the path derived from the profile name, `config/<profile>/tasks/<profile>.feather`.
 
 So the per-dataset recipe is tiny — for example, `config/microns_v1822/build.py`:
