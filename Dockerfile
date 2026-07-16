@@ -13,6 +13,11 @@ RUN pipx install poethepoet
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
 
+# Unbuffer stdout/stderr so the worker's poll/lease logging (tq.poll(verbose=True)
+# in run.py) streams live to `docker logs` / `kubectl logs` instead of sitting in
+# a block buffer behind the non-TTY pipe — otherwise a working worker looks idle.
+ENV PYTHONUNBUFFERED=1
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \

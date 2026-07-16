@@ -37,7 +37,7 @@ Every task/cluster command takes a **required** `-e/--env <profile>` selector
 | `poe check_filequeue -e <profile>` | Check filequeue status |
 | `poe reset_queue -e <profile>` | Reset the file queue |
 | `poe make_scripts -e <profile>` | Render Kubernetes scripts (optional; preview only — the cluster tasks auto-render) |
-| `poe launch_cluster -e <profile>` | Render scripts + create the GKE cluster |
+| `poe launch_cluster -e <profile>` | Render scripts + create the GKE cluster (idempotent: if it already exists, resizes the node pool to `NUMBER_NODES`) |
 | `poe use_context -e <profile>` | Point kubectl at that profile's cluster (switch/refresh) |
 | `poe apply_task -e <profile>` | Render scripts + set context + deploy the task |
 | `poe deploy_task -e <profile>` | Create the cluster and deploy the task |

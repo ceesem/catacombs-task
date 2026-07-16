@@ -154,7 +154,9 @@ def main() -> None:
     print(f"── progress: {profile} ───────────────────────────────")
     print(f"  as of            : {now_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     print(f"  cloudpath        : {cloudpath}")
-    print(f"  total tasks      : {total}")
+    # Counts are per cell (one .osy per root_id), not per queued task — a task
+    # batches TASK_BATCH_SIZE cells, so the queue holds ~total/TASK_BATCH_SIZE tasks.
+    print(f"  total cells      : {total}")
     print(f"  processed (done) : {processed}  ({pct:.1f}%)")
     print(f"      succeeded    : {len(success)}   (.osy)")
     print(f"      data errors  : {len(data_perm)}")
